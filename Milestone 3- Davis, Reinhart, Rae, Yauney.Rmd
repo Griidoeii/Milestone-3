@@ -1,0 +1,710 @@
+---
+title: "Milestone 3"
+author: "Amanda Reinhart, Staci Davis, Victor Rae, Josh Yauney"
+date: "5/06/2021"
+output: html_document
+---
+```{r}
+library(shinydashboard)
+library(shiny)
+library(flexdashboard)
+library(leaflet)
+library(plotly)
+library(ggplot2)
+library(dplyr)
+library(tidyverse)
+library(lubridate)
+library(RSocrata)
+library(stats)
+library(base)
+library(graphics)
+library(DT)
+library(ggthemes)
+library(tree)
+library(randomForest)
+library(knitr)
+library(MASS)
+library(broom)
+library(class)
+library(ROCR)
+library(rgdal)
+```
+
+ 
+
+
+```{r}
+years_ago <- today() - years(2)
+
+ 
+
+ 
+
+ 
+
+crash_url <- glue::glue("https://data.cityofchicago.org/Transportation/Traffic-Crashes-Crashes/85ca-t3if?$where=CRASH_DATE > '{years_ago}'")
+crash_raw <- as_tibble(read.socrata(crash_url))
+
+ 
+
+ 
+
+ 
+
+crash <- crash_raw %>%
+arrange(desc(crash_date)) %>%
+transmute(
+injuries = if_else(injuries_total > 0, "injuries", "none"),
+crash_date,
+crash_hour,
+report_type = if_else(report_type == "", "UNKNOWN", report_type),
+num_units,
+beat = beat_of_occurrence,
+posted_speed_limit,
+weather_condition,
+lighting_condition,
+roadway_surface_cond,
+first_crash_type,
+trafficway_type,
+prim_contributory_cause,
+latitude, longitude,
+crash_day_of_week,
+crash_type,
+num_units
+) %>%
+na.omit()
+
+ 
+
+
+crash = crash%>%
+  filter(longitude!=0)
+``` 
+
+ 
+
+
+```{r}
+crashmap<- crash_raw %>%
+  filter(injuries_total>0) %>%
+  dplyr::select(longitude,latitude,crash_date,weather_condition,roadway_surface_cond,lighting_condition,prim_contributory_cause) %>%
+  filter(longitude!=0)
+```
+
+ 
+
+
+```{r}
+ crashtable <- crash_raw %>%
+  filter(injuries_total>0) %>%
+  dplyr::select(prim_contributory_cause,num_units,posted_speed_limit,first_crash_type,trafficway_type)
+```
+
+ 
+
+
+```{r}
+crash_injuries <- crash_raw%>%
+  filter(injuries_total>0) %>%
+  dplyr::select(crash_day_of_week, crash_hour, crash_date)
+```
+
+ 
+
+# KNN
+```{r}
+`%!in%` <- Negate(`%in%`)
+crash2<-data.frame(
+    
+    injuries = if_else(crash$injuries %in% "injuries",1,0),
+
+    weather_clear = if_else(crash$weather_condition %in% 'CLEAR', 1, 0),
+    weather_rainy = if_else(crash$roadway_surface_cond %in% "WET",1,if_else(crash$weather_condition %in% c("FREEZING RAIN/DRIZZLE","RAIN","SLEET/HAIL"),1,0)),
+    weather_snowy = if_else(crash$roadway_surface_cond %in% c("SNOW OR SLUSH","ICE"),1,if_else(crash$weather_condition %in% "SNOW",1,0)),
+    weather_overcast = if_else(crash$weather_condition %in% c("CLOUDY/OVERCAST","FOG/SMOKE/HAZE"),1,0),
+    
+    lighting_daylight = if_else(crash$lighting_condition %in% "DAYLIGHT",1,0),
+    lighting_darkness = if_else(crash$lighting_condition %in% "DARKNESS",1,0),
+    lighting_darkness_illuminated = if_else(crash$lighting_condition %in% c("DARKNESS, LIGHTED ROAD"),1,0),
+    lighting_dawn_or_dusk = if_else(crash$lighting_condition %in% c("DAWN","DUSK"),1,0),
+    
+    crash_type_parked = if_else(crash$first_crash_type %in% "PARKED MOTOR VEHICLE",1,0),
+    crash_type_angle = if_else(crash$first_crash_type %in% "ANGLE",1,0),
+    crash_type_pedestrian = if_else(crash$first_crash_type %in% "PEDESTRIAN",1,0),
+    crash_type_pedalcyclist = if_else(crash$first_crash_type %in% "PEDALCYCLIST",1,0),
+    crash_type_head_on = if_else(crash$first_crash_type %in% "HEAD ON",1,0),
+    crash_type_other = if_else(crash$first_crash_type %!in% c("HEAD ON","PEDALCYCLIST","PEDESTRIAN","ANGLE","PARKED MOTOR VEHICLE"),1,0),
+    
+    trafficway_type_four_way = if_else(crash$trafficway_type %in% "FOUR WAY",1,0),
+    trafficway_type_center_turn_lane = if_else(crash$trafficway_type %in% "CENTER TURN LANE",1,0),
+    trafficway_type_t_intersection = if_else(crash$trafficway_type %in% "T-INTERSECTION",1,0),
+    trafficway_type_other = if_else(crash$trafficway_type %!in% c("FOUR WAY","CENTER TURN LANE","T-INTERSECTION"),1,0),
+    
+    crash_month=as.integer(format(crash$crash_date,'%m')))
+    
+crash3 = data.frame(crash2,
+    crash_day_of_week = crash$crash_day_of_week,
+    crash_hour = crash$crash_hour,
+    
+    
+    num_units = crash$num_units,
+    
+    posted_speed_limit_int = crash$posted_speed_limit,
+    
+    latitude= crash$latitude,
+    longitude= crash$longitude
+)%>%na.omit()
+```
+
+ 
+
+ 
+
+ 
+
+
+```{r}
+set.seed(2022)
+samp <- sample.int(n=nrow(crash3), size= nrow(crash3)*.75, replace = FALSE)
+
+crash_train = crash3[samp,]
+crash_val = crash3[-samp,]
+
+crash_train_copy = crash_train
+
+crash_train_copy$ID <- seq_along(crash_train[,1])
+
+crash_train_injury_boosted1 <- crash_train_copy%>%
+  mutate(injuries_boosted=ifelse(injuries==1,0,ifelse((ID %% 2) == 0,1,0)))%>%
+  filter(injuries_boosted==0) 
+
+crash_train_injury_boosted1$ID2 = seq_along(crash_train_injury_boosted1[,1])
+
+crash_train_injury_boosted2 <- crash_train_injury_boosted1%>%
+  mutate(injuries_boosted2=ifelse(injuries==1,0,ifelse((ID2 %% 2) == 0,1,0)))%>%
+  filter(injuries_boosted2==0)
+
+crash_train_injury_boosted2$ID3 = seq_along(crash_train_injury_boosted2[,1])
+
+crash_train_injury_boosted3 <- crash_train_injury_boosted2%>%
+  mutate(injuries_boosted3=ifelse(injuries==1,0,ifelse((ID3 %% 2) == 0,1,0)))%>%
+  filter(injuries_boosted3==0)
+
+crash_train_injury_boosted1 = crash_train_injury_boosted1[,1:26]
+crash_train_injury_boosted2 = crash_train_injury_boosted2[,1:26]
+crash_train_injury_boosted3 = crash_train_injury_boosted3[,1:26]
+```
+
+```{r}
+# standardize the variables we will use
+crash_std <-data.frame(scale(crash3[,2:26]),injuries=crash3[,1])
+
+# split the standardized data set into training and test using the same rows as before
+crash_std_train <- crash_std[samp,]
+crash_std_val <- crash_std[-samp,]
+
+crash_std_train_copy = crash_std_train
+
+crash_std_train_copy$ID <- seq_along(crash_std_train[,1])
+
+crash_std_train_injury_boosted1 <- crash_std_train_copy%>%
+  mutate(injuries_boosted=ifelse(injuries==1,0,ifelse((ID %% 2) == 0,1,0)))%>%
+  filter(injuries_boosted==0) 
+
+crash_std_train_injury_boosted1$ID2 = seq_along(crash_std_train_injury_boosted1[,1])
+
+crash_std_train_injury_boosted2 <- crash_std_train_injury_boosted1%>%
+  mutate(injuries_boosted2=ifelse(injuries==1,0,ifelse((ID2 %% 2) == 0,1,0)))%>%
+  filter(injuries_boosted2==0)
+
+crash_std_train_injury_boosted2$ID3 = seq_along(crash_std_train_injury_boosted2[,1])
+
+crash_std_train_injury_boosted3 <- crash_std_train_injury_boosted2%>%
+  mutate(injuries_boosted3=ifelse(injuries==1,0,ifelse((ID3 %% 2) == 0,1,0)))%>%
+  filter(injuries_boosted3==0)
+
+crash_std_train_injury_boosted1 = crash_std_train_injury_boosted1[,1:26]
+crash_std_train_injury_boosted2 = crash_std_train_injury_boosted2[,1:26]
+crash_std_train_injury_boosted3 = crash_std_train_injury_boosted3[,1:26]
+
+knn_mod <- knn(crash_std_train_injury_boosted3[,2:26], crash_std_val[,2:26], crash_std_train_injury_boosted3$injuries, k=41)
+
+knn_val <- data.frame(crash3,knn_mod)
+
+# create confusion matrix
+knn_val%>%
+  count(injuries,knn_mod)%>%
+  pivot_wider(names_from = knn_mod,values_from = n)
+```
+
+ 
+```{r}
+beats <- readOGR('~/beats.geojson')
+beats@data$beat_num <- as.numeric(beats@data$beat_num)
+```
+
+ 
+
+```{r}
+with_injuries <- crash %>%
+filter(injuries == "injuries")
+
+ 
+
+add_data <- with_injuries%>%
+  group_by(beat) %>%
+  summarize(num_crash=n())%>%
+  ungroup()
+
+ 
+
+add_data2 <- with_injuries%>%
+  group_by(beat)%>%
+  summarize(crash_date=n())%>%
+  ungroup()
+
+beats_merge <- merge(beats,add_data,by.x='beat_num',by.y='beat')
+#beats_merge <- merge(beats_merge,add_data2,by.x='beat_num',by.y='beat')
+```
+
+ 
+
+```{r}
+bins <- c(0,75,150,225,300,375)
+pal <- colorBin('viridis', domain = beats_merge$num_crash,bins=bins)
+marks <- data.frame(long=c(-87.7522, -87.9090, -87.6051), lat = c(41.7868, 41.9803, 41.8919), name = c('Midway Airport', 'OHare Airport','Navy Pier'))
+```
+ 
+
+```{r}
+header <- dashboardHeader(
+  title = "Predicting Crashes in Chicago", titleWidth = 300,
+  dropdownMenu(type = "messages",
+               messageItem(from = "Group", 
+                           message = "Look at the Crash Data",
+                           href = "https://data.cityofchicago.org/Transportation/Traffic-Crashes-Crashes/85ca-t3if")))
+```
+
+ 
+
+ 
+
+ 
+
+```{r}
+sidebar <- dashboardSidebar(sidebarMenu(
+  menuItem("Source code", icon = icon("file-code-o"), 
+           href = "https://github.com/Griidoeii/378-Project"),
+  menuItem("Home Page",tabName="tab0"),
+  menuItem("Maps", tabName = "tab1"),
+  menuItem("Table",tabName = "tab2"),
+  menuItem("Crash and Injury Graphs",tabName="tab3"),
+  fluidPage( dateRangeInput("Date range:",inputId = "daterange",
+                 start  = today() - years(2),
+                 end    = today(),
+                 min    = today() - years(2),
+                 max    = today(),
+                 format = "mm/dd/yy"))),
+  width = 300
+)
+```
+
+ 
+
+
+```{r}
+body <- dashboardBody(
+  tabItems(tabItem(tabName = "tab0", h2("Welcome, Let's Explore Some Data!"), fluidRow(shinydashboard::valueBoxOutput("crashTotBox",width = 13)),h2("Compare Our Predictions to Actual Crash Injuries:"), leafletOutput("mapknn"), fluidRow(shinydashboard::valueBoxOutput("predictionTotBox", width = 13)),
+  fluidRow(shinydashboard::valueBoxOutput("actualTotBox", width = 13))),
+       tabItem(tabName = "tab1", h2("Filter Maps of the Area  by Our Key Factors:"), leafletOutput("mapy"),
+               fluidRow(shinydashboard::valueBoxOutput("InjuryBoxMetric",width = 10)),
+            checkboxGroupInput("metric",
+                 "Weather:",
+                 c("Clear" = "CLEAR", 
+                   "Rain" = "RAIN",
+                   "Snow" = "SNOW",
+                   "Cloudy and Overcast" ="CLOUDY/OVERCAST",
+                   "Sleet and Hail" = "SLEET/HAIL",
+                   "Fog, Haze, and Smoke" = "FOG/SMOKE/HAZE",
+                   "Freezing Rain and Drizzle" = "FREEZING RAIN/DRIZZLE",
+                   "Severe Crosswind" = "SEVERE CROSS WIND GATE",
+                   "Unknown" = "UNKNOWN",
+                   "Other"= "OTHER")
+          ),
+leafletOutput("mapyy"),
+fluidRow(shinydashboard::valueBoxOutput("InjuryBoxRoad",width = 10)),
+checkboxGroupInput("variable", "Road Conditions:",
+                     c("Dry" = "DRY",
+                       "Snow or Slush" = "SNOW OR SLUSH",
+                       "Sand, Mud, and Dirt" = "SAND, MUD, DIRT",
+                       "Wet" = "WET",
+                       "Icey" = "ICE",
+                       "Unknown" = "UNKNOWN",
+                       "Other" = "OTHER")),
+leafletOutput("mapyyy"),
+fluidRow(shinydashboard::valueBoxOutput("InjuryBoxLighting",width = 10)),
+selectInput("light","Lighting Conditions:",
+            c("Darkness"= "DARKNESS",
+              "Darkness with Lighted Road"="DARKNESS, LIGHTED ROAD",
+              "Dawn"="DAWN",
+              "Daylight"="DAYLIGHT",
+              "Dusk" = "DUSK",
+              "Unknown"="UNKNOWN"))
+),
+       tabItem(tabName = "tab2", h2("Look Through Crashes Resulting in Injuries:"),
+         selectInput("cause", "Cause of Crash:",
+                c("Unknown" = "UNABLE TO DETERMINE",
+  "Wrong way" = "DRIVING ON WRONG SIDE/WRONG WAY",
+  "Failure to Stop" = "FAILING TO REDUCE SPEED TO AVOID CRASH",
+  "Failure to Yield"="FAILING TO YIELD RIGHT-OF-WAY",
+  "Improper Passing"="IMPROPER OVERTAKING/PASSING",
+  "Following too Closely"="FOLLOWING TOO CLOSELY",
+  "Improper Turning"="IMPROPER OVERTAKING/PASSING",
+  "Disregarding Traffic Signals"="DISREGARDING TRAFFIC SIGNALS",
+  "N/A"="NOT APPLICABLE",
+  "Reckless/Careless/Agressive Vehicle Operation"="OPERATING VEHICLE IN ERRATIC, RECKLESS, CARELESS, NEGLIGENT OR AGGRESSIVE MANNER",
+  "Equipment/Car Issues" = "EQUIPMENT - VEHICLE CONDITION",
+  "Health of the Driver"="PHYSICAL CONDITION OF DRIVER",
+  "Low Driving Skill"="DRIVING SKILLS/KNOWLEDGE/EXPERIENCE",
+  "Driving Under the Influence w/Arrest"="UNDER THE INFLUENCE OF ALCOHOL/DRUGS (USE WHEN ARREST IS EFFECTED)",
+  "Driving Under the Influence w/o Arrest"="HAD BEEN DRINKING (USE WHEN ARREST IS NOT MADE)",
+  "Weather"="WEATHER",
+  "Improper Backing"="WEATHER",
+  "Improper Lane Usage"="IMPROPER LANE USAGE",
+  "Evasive Action due to Animal, Object, or Non-Motorist"="EVASIVE ACTION DUE TO ANIMAL, OBJECT, NONMOTORIST",
+  "Animal"="ANIMAL",
+  "Distraction Inside Vehicle"="DISTRACTION - FROM INSIDE VEHICLE",
+  "Disregarding Stop Sign"="DISREGARDING STOP SIGN",
+  "Disregarding Traffic Signs (Not Stop Sign)"="DISREGARDING OTHER TRAFFIC SIGNS",
+  "Obscured Vision"="VISION OBSCURED (SIGNS, TREE LIMBS, BUILDINGS, ETC.)",
+  "Road Construction"="ROAD CONSTRUCTION/MAINTENANCE",
+  "Non-Texting Phone Use"="CELL PHONE USE OTHER THAN TEXTING",
+  "Texting"="TEXTING",
+  "Disregarding Road Markings"="DISREGARDING ROAD MARKINGS",
+  "Distraction From Outside the Car"="DISTRACTION - FROM OUTSIDE VEHICLE",
+  "Obstructed Crosswalk"="OBSTRUCTED CROSSWALKS",
+  "Right Turn on Red"="TURNING RIGHT ON RED",
+  "Road Engineering" = "ROAD ENGINEERING/SURFACE/MARKING DEFECTS",
+  "Motorcycle Advance on Red"="MOTORCYCLE ADVANCING LEGALLY ON RED LIGHT",
+  "Distraction by Electronics (Not Phone)"="DISTRACTION - OTHER ELECTRONIC DEVICE (NAVIGATION DEVICE, DVD PLAYER, ETC.)",
+  "Disregarding Yield Sign"="DISREGARDING YIELD SIGN",
+  "Related to a Bus Stop"="RELATED TO BUS STOP",
+  "Bike Advancing Legally"="BICYCLE ADVANCING LEGALLY ON RED LIGHT",
+  "Passing Stopped School Bus"="PASSING STOPPED SCHOOL BUS"
+  )),
+    dataTableOutput("table")),
+tabItem(tabName = "tab3", h2("Filter Crashes and Crashes with Injuries:"),
+         radioButtons(inputId = "day", "Choose Day of the Week:",
+               c("Sunday" = 1,
+                 "Monday" = 2,
+                 "Tuesday" = 3,
+                 "Wednesday" = 4,
+                 "Thursday" = 5,
+                 "Friday" = 6,
+                 "Saturday" = 7
+                 )),
+  fluidRow(column(plotOutput("distPlot"),width = 6),
+  column(plotOutput("distPlot2"),width = 6)))
+
+)) 
+
+ 
+
+
+```
+
+```{r}
+marks <- data.frame(long=c(-87.7522, -87.9090, -87.6051), lat = c(41.7868, 41.9803, 41.8919), name = c('Midway Airport', 'OHare Airport','Navy Pier'))
+
+server <- function(input, output) {
+ start_date<-reactive({format(input$daterange[1])})
+end_date<-reactive({format(input$daterange[2])})
+
+ 
+output$crashTotBox <- shinydashboard::renderValueBox({
+    shinydashboard::valueBox(
+      "Total Crashes In the Last 2 Years", paste0(nrow(crash)), icon = icon("fire"),
+      color = "red"
+    )
+  })
+ 
+
+dateBasey <-reactive({
+  choice <- input$metric
+thing <- crashmap%>%
+  filter(as.Date(crashmap$crash_date) %in% seq.Date(as.Date(input$daterange[1]),as.Date(input$daterange[2]), by="day"))%>%
+              filter(weather_condition %in% choice) 
+})
+
+ 
+
+
+output$mapy <-renderLeaflet({
+ leaflet(beats_merge)%>%
+              addProviderTiles(providers$Esri.WorldImagery) %>%
+  setView(lng= -87.6766,lat = 41.8411,zoom=10)%>%
+              addPolygons(weight=2, color='black', label = ~beat_num) %>%
+              addMarkers(data=marks, ~long, ~lat, label = ~name) 
+    
+})
+
+ 
+
+
+observe({
+    leafletProxy("mapy", data = dateBasey()) %>% 
+    clearMarkers() %>%
+    clearControls() %>%
+    addCircleMarkers(~longitude,~latitude, radius = 2, stroke= FALSE,fillOpacity=.6,color = (ifelse(input$metric=="CLEAR", 'brown', ifelse(input$metric=="RAIN", 'yellow', ifelse(input$metric=="SNOW", 'black',ifelse(input$metric=="CLOUDY AND OVERCAST", 'blue', ifelse(input$metric=="SLEET AND HAIL", 'lightblue',ifelse(input$metric=="FOG, HAZE, AND SMOKE", 'green',ifelse(input$metric=="FREEZING RAIN AND DRIZZLE","olive",ifelse(input$metric=="SEVERE CROSSWIND","orange",ifelse(input$metric=="UNKNOWN","plum1",'magenta')))))))))))%>%
+    addLegend(colors = c('brown','yellow','black','blue','lightblue','green',"olive","orange","plum",'magenta'), labels = c("Clear", "Rain", "Snow", "Cloudy and Overcast","Sleet and Hail","Fog, Haze, and Smoke","Freezing Rain and Drizzle","Severe Crosswind","Unknown","Other"), position = 'topright', title = 'Weather Conditions')%>%
+              addMarkers(data=marks, ~long, ~lat, label = ~name) 
+  })
+
+ 
+
+
+dateBaseyy <-reactive({
+   choicey <- input$variable
+thingyy <- crashmap%>%
+  filter(as.Date(crashmap$crash_date) %in% seq.Date(as.Date(input$daterange[1]),as.Date(input$daterange[2]), by="day"))%>%
+  filter(roadway_surface_cond %in% choicey)
+})
+
+ 
+
+
+output$mapyy <-renderLeaflet({
+  leaflet(beats_merge)%>%
+              addProviderTiles(providers$Esri.WorldImagery) %>%
+  setView(lng= -87.6766,lat = 41.8411,zoom=10)%>%
+              addPolygons(weight=2, color='black', label = ~beat_num) %>%
+              addMarkers(data=marks, ~long, ~lat, label = ~name) 
+    
+})
+
+ 
+
+
+observe({
+    leafletProxy("mapyy", data = dateBaseyy()) %>%
+    clearMarkers() %>%
+    clearControls()%>%
+    addCircleMarkers(~longitude,~latitude, radius = 2, stroke= FALSE,fillOpacity=.6,color = (ifelse(input$variable=="DRY", 'brown', ifelse(input$variable=="SNOW OR SLUSH", 'yellow', ifelse(input$variable=="SAND, MUD, DIRT", 'black',ifelse(input$variable=="WET", 'blue', ifelse(input$variable=="ICE", 'lightblue',ifelse(input$variable=="UNKNOWN", 'green','magenta'))))))))%>%
+    addLegend(colors = c('brown','yellow','black','blue','lightblue','green','magenta'), labels = c("Dry", "Snow or Slush", "Sand, Mud, and Dirt", "Wet","Icey","Unknown","Other"), position = 'topright', title = 'Road Conditions')%>%
+              addMarkers(data=marks, ~long, ~lat, label = ~name) 
+})
+
+ 
+
+
+dateBaseyyy <-reactive({
+  choiceyy <- input$light
+thingyyy <- crashmap%>%
+  filter(as.Date(crashmap$crash_date) %in% seq.Date(as.Date(input$daterange[1]),as.Date(input$daterange[2]), by="day"))%>%
+              filter(lighting_condition==choiceyy) 
+})
+
+ 
+
+
+output$mapyyy <-renderLeaflet({
+ leaflet(beats_merge)%>%
+              addProviderTiles(providers$Esri.WorldImagery) %>%
+  setView(lng= -87.6766,lat = 41.8411,zoom=10)%>%
+              addPolygons(weight=2, color='black', label = ~beat_num) %>%
+              addMarkers(data=marks, ~long, ~lat, label = ~name)  
+    
+})
+
+
+
+
+observe({
+    leafletProxy("mapyyy", data = dateBaseyyy()) %>% 
+    clearMarkers() %>%
+    addCircleMarkers(~longitude,~latitude, radius = 2, stroke= FALSE,fillOpacity=.6,color='#3CBB75FF') %>%
+              addMarkers(data=marks, ~long, ~lat, label = ~name) 
+  })
+
+ 
+
+ 
+
+output$table <- renderDataTable({
+      crashtable%>%
+    filter(prim_contributory_cause %in% input$cause)%>%
+    dplyr::select(first_crash_type,trafficway_type,num_units,posted_speed_limit)
+})
+
+ 
+
+
+output$distPlot <- renderPlot({
+    crash <- crash%>%
+      filter(crash_day_of_week==input$day)
+
+ 
+
+
+    ggplot(data=crash%>%
+  filter(as.Date(crash$crash_date) %in% seq.Date(as.Date(input$daterange[1]),as.Date(input$daterange[2]), by="day")),aes(x=crash_hour)) +
+geom_bar()+ xlab("Time (hr)") +
+ylab("Crashes") +theme_economist()
+  })
+
+ 
+
+ 
+
+ 
+
+output$distPlot2 <- renderPlot({
+    crash_injuries2 <- crash_injuries%>%
+      filter(crash_day_of_week==input$day)
+
+ 
+
+
+    ggplot(data=crash_injuries2%>%
+  filter(as.Date(crash_injuries2$crash_date) %in% seq.Date(as.Date(input$daterange[1]),as.Date(input$daterange[2]), by="day")),aes(x=crash_hour)) +
+geom_bar()+ xlab("Time (hr)") +
+ylab("Crashes Resulting in Injuries") +theme_economist()
+  })
+
+ 
+
+ 
+
+#Rynes Stuff
+
+ 
+
+
+InjuryCrashBoxesData <-reactive({
+   choicey <- input$variable
+thingyy <- crash %>%
+  filter(as.Date(crash$crash_date) %in% seq.Date(as.Date(input$daterange[1]),as.Date(input$daterange[2]), by="day"))%>%
+  filter(roadway_surface_cond %in% choicey)
+})
+
+
+
+
+
+output$InjuryBoxRoad <- shinydashboard::renderValueBox({
+    shinydashboard::valueBox(
+      "Total Injuries",paste0(length(which(InjuryCrashBoxesData()$injuries == "injuries"))),icon = icon("fire"),
+      color = "olive"
+    )
+})
+
+ 
+
+
+
+InjuryCrashBoxesMetrics <-reactive({
+   choicey <- input$metric
+thingyy <- crash %>%
+    filter(as.Date(crash$crash_date) %in% seq.Date(as.Date(input$daterange[1]),as.Date(input$daterange[2]), by="day"))%>%
+  filter(weather_condition %in% choicey)
+})
+
+ 
+
+
+output$InjuryBoxMetric <- shinydashboard::renderValueBox({
+    shinydashboard::valueBox(
+      "Total Injuries",paste0(length(which(InjuryCrashBoxesMetrics()$injuries == "injuries"))),icon = icon("fire"),
+      color = "olive"
+    )
+})
+
+ 
+
+
+InjuryCrashBoxesLightings <-reactive({
+   choicey <- input$light
+thingyy <- crash %>%
+  filter(as.Date(crash$crash_date) %in% seq.Date(as.Date(input$daterange[1]),as.Date(input$daterange[2]), by="day"))%>%
+  filter(lighting_condition %in% choicey)
+})
+
+ 
+
+
+output$InjuryBoxLighting <- shinydashboard::renderValueBox({
+    shinydashboard::valueBox(
+      "Total Injuries",paste0(length(which(InjuryCrashBoxesLightings()$injuries == "injuries"))),icon = icon("fire"),
+      color = "olive"
+    )
+})
+
+ 
+
+ 
+
+#KNN
+
+knn_new <- knn_val%>%
+  filter(knn_mod==1) 
+
+
+ 
+
+
+output$mapknn <-renderLeaflet({
+ leaflet(crashmap)%>%
+      addProviderTiles(providers$Esri.WorldStreetMap)%>%
+    setView(lng= -87.6766,lat = 41.8411,zoom=10)%>%
+    addCircleMarkers(~knn_new$longitude,~knn_new$latitude, radius = 2, stroke= FALSE,fillOpacity=.6,color='blue')%>%
+    addCircleMarkers(~crashmap$longitude,~crashmap$latitude, radius = 2, stroke= FALSE,fillOpacity=.6,color='magenta')%>%
+     addLegend(colors = c('blue','magenta'), labels = c("Predicted", "Actual"), position = 'topright', title = 'Crashes w/Injuries')%>%
+              addMarkers(data=marks, ~long, ~lat, label = ~name) 
+})
+
+output$predictionTotBox <- shinydashboard::renderValueBox({
+    shinydashboard::valueBox(
+      "Predicted Crashes with Injuries", paste0(nrow(knn_new)), icon = icon("road"),
+      color = "blue"
+    )
+  })
+
+output$actualTotBox <- shinydashboard::renderValueBox({
+    shinydashboard::valueBox(
+      "Actual Crashes with Injuries", paste0(nrow(crash_std_train_injury_boosted3)), icon = icon("road"),
+      color = "fuchsia"
+    )
+  })
+
+ 
+
+
+
+}
+```
+
+ 
+
+
+```{r}
+ui <- dashboardPage(skin = "red",
+  header,
+  sidebar,
+  body)
+shinyApp(ui = ui, server = server)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
